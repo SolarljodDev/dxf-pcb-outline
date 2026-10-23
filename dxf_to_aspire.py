@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
@@ -804,7 +806,18 @@ def write_result(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output.saveas(output_path)
+    with tempfile.NamedTemporaryFile(
+        dir=output_path.parent,
+        prefix=f".{output_path.stem}.",
+        suffix=".tmp.dxf",
+        delete=False,
+    ) as temporary_file:
+        temporary_path = Path(temporary_file.name)
+    try:
+        output.saveas(temporary_path)
+        os.replace(temporary_path, output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return track_count, pour_count, drill_count, board_count
 
 
@@ -936,7 +949,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_path = (
         args.output.expanduser().resolve()
         if args.output
-        else input_path.with_name(f"{input_path.stem}_aspire_tracks.dxf")
+        else input_path.with_name(f"{input_path.stem}_fromPDF.dxf")
     )
     if output_path.suffix.casefold() != ".dxf":
         parser.error("output must be a .dxf file for Aspire")

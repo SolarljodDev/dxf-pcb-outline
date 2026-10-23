@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 results/
+csharp/bin/
+csharp/obj/
+portable/

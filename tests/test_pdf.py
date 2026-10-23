@@ -58,6 +58,23 @@ def make_pdf(
 
 
 class PdfConversionTest(unittest.TestCase):
+    def test_default_output_uses_from_pdf_marker_and_overwrites(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "board.pdf"
+            output = Path(temp) / "board_fromPDF.dxf"
+            unrelated = Path(temp) / "board.dxf"
+            make_pdf(source, 2.0)
+            unrelated.write_bytes(b"original EasyEDA DXF")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(converter.main([str(source)]), 0)
+            self.assertTrue(output.is_file())
+            self.assertFalse((Path(temp) / "board_aspire_tracks.dxf").exists())
+            output.write_bytes(b"previous result")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(converter.main([str(source)]), 0)
+            self.assertNotEqual(output.read_bytes(), b"previous result")
+            self.assertEqual(unrelated.read_bytes(), b"original EasyEDA DXF")
+
     def test_pdf_stroke_width_and_compound_fill(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "board.pdf"
