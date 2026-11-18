@@ -18,6 +18,7 @@ internal sealed record BoardGeometry(
 internal static class PdfGeometry
 {
     internal const double MmPerPoint = 25.4 / 72.0;
+    private const double BoardEndpointToleranceMm = 0.005;
     private static readonly GeometryFactory Factory = new();
 
     internal static BoardGeometry Read(string file, double toleranceMm = 0.0005,
@@ -39,10 +40,14 @@ internal static class PdfGeometry
             .Where(p => p.Count >= 2)
             .Select(p => (Geometry)Factory.CreateLineString(p.ToArray()))
             .ToList();
+        boardLines = SnapLineEndpoints(boardLines, BoardEndpointToleranceMm);
         var boardFaces = Polygonize(boardLines);
-        if (boardFaces.Count != 1)
+        if (boardFaces.Count == 0)
             throw new InvalidDataException("Could not identify one board outline in the PDF.");
-        Geometry board = boardFaces[0];
+        // PDF exporters often emit the four straight sides and rounded corners
+        // as separate strokes. Prefer the outer board face if those strokes
+        // also enclose smaller decorative or internal loops.
+        Geometry board = boardFaces.MaxBy(face => face.Area)!;
 
         var copperParts = new List<Geometry>();
         var blackFills = new List<Geometry>();
@@ -234,6 +239,79 @@ internal static class PdfGeometry
         var polygonizer = new Polygonizer();
         polygonizer.Add(Union(lines));
         return polygonizer.GetPolygons().Cast<Polygon>().ToList();
+    }
+
+    private static List<Geometry> SnapLineEndpoints(IReadOnlyList<Geometry> lines,
+        double tolerance)
+    {
+        if (lines.Count == 0) return [];
+        var points = new List<Coordinate>(lines.Count * 2);
+        var parents = new List<int>(lines.Count * 2);
+        var cells = new Dictionary<(long X, long Y), List<int>>();
+
+        int Find(int value)
+        {
+            if (parents[value] != value) parents[value] = Find(parents[value]);
+            return parents[value];
+        }
+
+        void Join(int first, int second)
+        {
+            int a = Find(first), b = Find(second);
+            if (a != b) parents[b] = a;
+        }
+
+        void AddEndpoint(Coordinate point)
+        {
+            int index = points.Count;
+            points.Add(point);
+            parents.Add(index);
+            long cellX = (long)Math.Floor(point.X / tolerance);
+            long cellY = (long)Math.Floor(point.Y / tolerance);
+            for (long dx = -1; dx <= 1; dx++)
+                for (long dy = -1; dy <= 1; dy++)
+                    if (cells.TryGetValue((cellX + dx, cellY + dy), out var nearby))
+                        foreach (int other in nearby)
+                            if (point.Distance(points[other]) <= tolerance)
+                                Join(index, other);
+            if (!cells.TryGetValue((cellX, cellY), out var bucket))
+                cells[(cellX, cellY)] = bucket = [];
+            bucket.Add(index);
+        }
+
+        foreach (Geometry line in lines)
+        {
+            Coordinate[] coordinates = line.Coordinates;
+            AddEndpoint(coordinates[0]);
+            AddEndpoint(coordinates[^1]);
+        }
+
+        var centers = new Dictionary<int, (double X, double Y, int Count)>();
+        for (int i = 0; i < points.Count; i++)
+        {
+            int root = Find(i);
+            var current = centers.GetValueOrDefault(root);
+            centers[root] = (current.X + points[i].X,
+                current.Y + points[i].Y, current.Count + 1);
+        }
+
+        var result = new List<Geometry>(lines.Count);
+        for (int i = 0; i < lines.Count; i++)
+        {
+            Coordinate[] coordinates = lines[i].Coordinates
+                .Select(point => new Coordinate(point.X, point.Y)).ToArray();
+            foreach (int endpoint in new[] { i * 2, i * 2 + 1 })
+            {
+                int root = Find(endpoint);
+                var center = centers[root];
+                var snapped = new Coordinate(center.X / center.Count,
+                    center.Y / center.Count);
+                coordinates[endpoint % 2 == 0 ? 0 : coordinates.Length - 1] = snapped;
+            }
+            if (coordinates.Length == 2 && coordinates[0].Equals2D(coordinates[1])) continue;
+            result.Add(Factory.CreateLineString(coordinates));
+        }
+        return result;
     }
 
     private static Coordinate[] Close(List<Coordinate> points) =>

@@ -264,6 +264,65 @@ def _filled_area(paths: Sequence[Sequence[tuple[float, float]]]) -> BaseGeometry
     return union_all(selected) if selected else GeometryCollection()
 
 
+def _snap_line_endpoints(
+    lines: Sequence[LineString], tolerance: float
+) -> list[LineString]:
+    """Join PDF strokes whose endpoints differ only by export rounding."""
+    if not lines:
+        return []
+
+    points: list[tuple[float, float]] = []
+    parents: list[int] = []
+    cells: dict[tuple[int, int], list[int]] = {}
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def join(first: int, second: int) -> None:
+        a, b = find(first), find(second)
+        if a != b:
+            parents[b] = a
+
+    def add(point: tuple[float, float]) -> None:
+        index = len(points)
+        points.append(point)
+        parents.append(index)
+        cell_x, cell_y = math.floor(point[0] / tolerance), math.floor(point[1] / tolerance)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for other in cells.get((cell_x + dx, cell_y + dy), ()):
+                    if math.dist(point, points[other]) <= tolerance:
+                        join(index, other)
+        cells.setdefault((cell_x, cell_y), []).append(index)
+
+    coordinates = [list(line.coords) for line in lines]
+    for coords in coordinates:
+        add(coords[0])
+        add(coords[-1])
+
+    sums: dict[int, tuple[float, float, int]] = {}
+    for index, (x, y) in enumerate(points):
+        root = find(index)
+        sx, sy, count = sums.get(root, (0.0, 0.0, 0))
+        sums[root] = (sx + x, sy + y, count + 1)
+    centers = {
+        root: (sx / count, sy / count)
+        for root, (sx, sy, count) in sums.items()
+    }
+
+    result: list[LineString] = []
+    for index, coords in enumerate(coordinates):
+        coords[0] = centers[find(index * 2)]
+        coords[-1] = centers[find(index * 2 + 1)]
+        if len(coords) == 2 and coords[0] == coords[1]:
+            continue
+        result.append(LineString(coords))
+    return result
+
+
 def _stroke_area(paint: Paint) -> BaseGeometry:
     if paint.width <= 0:
         return GeometryCollection()
@@ -295,10 +354,14 @@ def read_easyeda_pdf(
         if paint.operator in ("S", "s") and paint.stroke_gray < 0.5
         for path in paint.paths if len(path) >= 2
     ]
+    # EasyEDA emits rounded board corners as separate strokes. Their ends can
+    # be a few microns apart after PDF coordinate rounding, which leaves open
+    # rings unless we snap the endpoints before polygonizing.
+    board_lines = _snap_line_endpoints(board_lines, 0.005)
     board_faces = list(polygonize(union_all(board_lines))) if board_lines else []
-    if len(board_faces) != 1:
+    if not board_faces:
         raise ValueError("Could not identify the PDF board outline")
-    board_points = board_faces[0]
+    board_points = max(board_faces, key=lambda face: face.area)
     copper_parts: list[BaseGeometry] = []
     black_fills: list[BaseGeometry] = []
     white_fills: list[BaseGeometry] = []
